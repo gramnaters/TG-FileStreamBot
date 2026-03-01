@@ -37,13 +37,18 @@ func GetTGMessage(ctx context.Context, client *gotgproto.Client, messageID int) 
 	if err != nil {
 		return nil, err
 	}
-	messages := res.(*tg.MessagesChannelMessages)
-	message := messages.Messages[0]
-	if _, ok := message.(*tg.Message); ok {
-		return message.(*tg.Message), nil
-	} else {
-		return nil, fmt.Errorf("this file was deleted")
+	messages, ok := res.(*tg.MessagesChannelMessages)
+	if !ok {
+		return nil, fmt.Errorf("unexpected response type %T", res)
 	}
+	if len(messages.Messages) == 0 {
+		return nil, fmt.Errorf("message %d not found in log channel", messageID)
+	}
+	message := messages.Messages[0]
+	if msg, ok := message.(*tg.Message); ok {
+		return msg, nil
+	}
+	return nil, fmt.Errorf("this file was deleted")
 }
 
 func FileFromMedia(media tg.MessageMediaClass) (*types.File, error) {
@@ -115,13 +120,9 @@ func FileFromMessage(ctx context.Context, client *gotgproto.Client, messageID in
 	if err != nil {
 		return nil, err
 	}
-	err = cache.GetCache().Set(
-		key,
-		file,
-		3600,
-	)
-	if err != nil {
-		return nil, err
+	// Cache for 24 h; non-fatal if it fails
+	if setErr := cache.GetCache().Set(key, file, 86400); setErr != nil {
+		log.Warn("Failed to cache file metadata", zap.Int("messageID", messageID), zap.Error(setErr))
 	}
 	return file, nil
 }
@@ -177,5 +178,9 @@ func ForwardMessages(ctx *ext.Context, fromChatId, toChatId int64, messageID int
 	if err != nil {
 		return nil, err
 	}
-	return update.(*tg.Updates), nil
+	updates, ok := update.(*tg.Updates)
+	if !ok {
+		return nil, fmt.Errorf("unexpected updates type %T", update)
+	}
+	return updates, nil
 }

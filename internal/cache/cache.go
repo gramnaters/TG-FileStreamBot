@@ -25,7 +25,7 @@ func InitCache(log *zap.Logger) {
 	gob.Register(tg.InputDocumentFileLocation{})
 	gob.Register(tg.InputPhotoFileLocation{})
 	defer log.Sugar().Info("Initialized")
-	cache = &Cache{cache: freecache.NewCache(10 * 1024 * 1024), log: log}
+	cache = &Cache{cache: freecache.NewCache(64 * 1024 * 1024), log: log}
 }
 
 func GetCache() *Cache {

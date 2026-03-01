@@ -61,8 +61,23 @@ func getRouter(log *zap.Logger) *gin.Engine {
 	} else {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	router := gin.Default()
-	router.Use(gin.ErrorLogger())
+
+	// gin.New() skips the built-in logger (we use zap); keep only panic recovery.
+	router := gin.New()
+	router.Use(gin.Recovery())
+
+	// CORS middleware so HTML5 video/audio loads in browsers cross-origin.
+	router.Use(func(ctx *gin.Context) {
+		ctx.Header("Access-Control-Allow-Origin", "*")
+		ctx.Header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		ctx.Header("Access-Control-Allow-Headers", "Range, Content-Type")
+		if ctx.Request.Method == "OPTIONS" {
+			ctx.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		ctx.Next()
+	})
+
 	router.GET("/", func(ctx *gin.Context) {
 		ctx.JSON(http.StatusOK, types.RootResponse{
 			Message: "Server is running.",
@@ -71,6 +86,11 @@ func getRouter(log *zap.Logger) *gin.Engine {
 			Version: versionString,
 		})
 	})
+
+	router.GET("/ping", func(ctx *gin.Context) {
+		ctx.JSON(http.StatusOK, gin.H{"ok": true, "message": "pong"})
+	})
+
 	routes.Load(log, router)
 	return router
 }

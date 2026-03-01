@@ -64,8 +64,27 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
-	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
+	if len(update.Updates) < 2 {
+		ctx.Reply(u, "Error - unexpected update structure from Telegram", nil)
+		return dispatcher.EndGroups
+	}
+	updateMessageID, ok := update.Updates[0].(*tg.UpdateMessageID)
+	if !ok {
+		ctx.Reply(u, "Error - could not read message ID from update", nil)
+		return dispatcher.EndGroups
+	}
+	messageID := updateMessageID.ID
+	channelMsg, ok := update.Updates[1].(*tg.UpdateNewChannelMessage)
+	if !ok {
+		ctx.Reply(u, "Error - could not read channel message from update", nil)
+		return dispatcher.EndGroups
+	}
+	tgMsg, ok := channelMsg.Message.(*tg.Message)
+	if !ok {
+		ctx.Reply(u, "Error - could not read message content from update", nil)
+		return dispatcher.EndGroups
+	}
+	doc := tgMsg.Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)

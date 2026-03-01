@@ -30,7 +30,7 @@ func getStreamRoute(ctx *gin.Context) {
 	messageIDParm := ctx.Param("messageID")
 	messageID, err := strconv.Atoi(messageIDParm)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid message ID", http.StatusBadRequest)
 		return
 	}
 
@@ -41,9 +41,14 @@ func getStreamRoute(ctx *gin.Context) {
 	}
 
 	worker := bot.GetNextWorker()
+	if worker == nil {
+		http.Error(w, "no workers available", http.StatusServiceUnavailable)
+		return
+	}
 
 	file, err := utils.FileFromMessage(ctx, worker.Client, messageID)
 	if err != nil {
+		log.Error("Failed to get file from message", zap.Int("messageID", messageID), zap.Error(err))
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -55,28 +60,44 @@ func getStreamRoute(ctx *gin.Context) {
 		file.ID,
 	)
 	if !utils.CheckHash(authHash, expectedHash) {
-		http.Error(w, "invalid hash", http.StatusBadRequest)
+		http.Error(w, "invalid hash", http.StatusForbidden)
 		return
 	}
 
-	// for photo messages
+	// Common headers
+	ctx.Header("X-Robots-Tag", "noindex, nofollow")
+	ctx.Header("Access-Control-Allow-Origin", "*")
+	ctx.Header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+
+	// Handle OPTIONS preflight
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// For photo messages: use TelegramReader for proper chunked streaming
 	if file.FileSize == 0 {
+		// Fetch the first chunk to get actual size, then stream the rest
 		res, err := worker.Client.API().UploadGetFile(ctx, &tg.UploadGetFileRequest{
 			Location: file.Location,
 			Offset:   0,
 			Limit:    1024 * 1024,
 		})
 		if err != nil {
+			log.Error("Failed to fetch photo", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		result, ok := res.(*tg.UploadFile)
 		if !ok {
-			http.Error(w, "unexpected response", http.StatusInternalServerError)
+			http.Error(w, "unexpected response type from Telegram", http.StatusInternalServerError)
 			return
 		}
 		fileBytes := result.GetBytes()
+		ctx.Header("Content-Type", file.MimeType)
+		ctx.Header("Content-Length", strconv.Itoa(len(fileBytes)))
 		ctx.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", file.FileName))
+		ctx.Header("Cache-Control", "public, max-age=3600")
 		if r.Method != "HEAD" {
 			ctx.Data(http.StatusOK, file.MimeType, fileBytes)
 		}
@@ -84,6 +105,8 @@ func getStreamRoute(ctx *gin.Context) {
 	}
 
 	ctx.Header("Accept-Ranges", "bytes")
+	ctx.Header("Cache-Control", "public, max-age=3600")
+
 	var start, end int64
 	rangeHeader := r.Header.Get("Range")
 
@@ -92,40 +115,43 @@ func getStreamRoute(ctx *gin.Context) {
 		end = file.FileSize - 1
 		w.WriteHeader(http.StatusOK)
 	} else {
-		ranges, err := range_parser.Parse(file.FileSize, r.Header.Get("Range"))
+		ranges, err := range_parser.Parse(file.FileSize, rangeHeader)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid range", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
 		start = ranges[0].Start
 		end = ranges[0].End
 		ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, file.FileSize))
-		log.Info("Content-Range", zap.Int64("start", start), zap.Int64("end", end), zap.Int64("fileSize", file.FileSize))
+		log.Debug("Range request", zap.Int64("start", start), zap.Int64("end", end), zap.Int64("fileSize", file.FileSize))
 		w.WriteHeader(http.StatusPartialContent)
 	}
 
 	contentLength := end - start + 1
 	mimeType := file.MimeType
-
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
 
-	ctx.Header("Content-Type", mimeType)
-	ctx.Header("Content-Length", strconv.FormatInt(contentLength, 10))
-
 	disposition := "inline"
-
 	if ctx.Query("d") == "true" {
 		disposition = "attachment"
 	}
 
+	ctx.Header("Content-Type", mimeType)
+	ctx.Header("Content-Length", strconv.FormatInt(contentLength, 10))
 	ctx.Header("Content-Disposition", fmt.Sprintf("%s; filename=\"%s\"", disposition, file.FileName))
 
 	if r.Method != "HEAD" {
-		lr, _ := utils.NewTelegramReader(ctx, worker.Client, file.Location, start, end, contentLength)
-		if _, err := io.CopyN(w, lr, contentLength); err != nil {
-			log.Error("Error while copying stream", zap.Error(err))
+		lr, err := utils.NewTelegramReader(ctx, worker.Client, file.Location, start, end, contentLength)
+		if err != nil {
+			log.Error("Failed to create Telegram reader", zap.Error(err))
+			return
+		}
+		defer lr.Close()
+		written, err := io.CopyN(w, lr, contentLength)
+		if err != nil && err != io.EOF {
+			log.Warn("Stream copy ended early", zap.Int64("written", written), zap.Int64("expected", contentLength), zap.Error(err))
 		}
 	}
 }
